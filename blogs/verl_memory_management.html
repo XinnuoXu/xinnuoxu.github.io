@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>VeRL GPU Memory Management (colocated FSDP + vLLM)</title>
+<style>
+  :root{
+    --bg:#f6f8fa; --panel:#ffffff; --panel2:#eef1f5; --line:#d0d7de;
+    --txt:#1f2328; --muted:#59636e; --accent:#0969da;
+    --actor:#3b82f6; --opt:#7c3aed; --grad:#06b6d4; --act:#64748b;
+    --vw:#10b981; --vkv:#f59e0b; --free:#e7ebf0;
+    --ref:#ec4899; --warn:#bc4c00;
+    --code:#0b0f14;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:1150px;margin:0 auto;padding:28px 22px 80px}
+  h1{font-size:25px;margin:0 0 4px}
+  h2{font-size:19px;margin:40px 0 10px;border-bottom:1px solid var(--line);padding-bottom:7px}
+  h3{font-size:15px;margin:22px 0 8px;color:var(--accent)}
+  p{color:var(--txt)}
+  .sub{color:var(--muted);margin:0 0 18px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:14px 0}
+  code,pre{font-family:"SF Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .kv{display:flex;flex-wrap:wrap;gap:8px 18px;margin:6px 0 2px}
+  .kv b{color:var(--accent)}
+  .pill{display:inline-block;background:var(--panel2);border:1px solid var(--line);
+    border-radius:20px;padding:2px 11px;font-size:12px;color:var(--muted)}
+
+  /* gpu memory bar */
+  .gpuwrap{display:flex;gap:20px;align-items:flex-start;margin:16px 0 6px}
+  @media(max-width:860px){.gpuwrap{flex-direction:column;align-items:stretch}}
+  .barbox{flex:0 0 150px;text-align:center}
+  .bar{position:relative;width:150px;height:360px;background:var(--free);
+    border:1px solid var(--line);border-radius:9px;overflow:hidden;display:flex;
+    flex-direction:column-reverse;margin:0 auto}
+  .seg{width:100%;display:flex;align-items:center;justify-content:center;
+    font-size:10.5px;color:#fff;font-weight:650;letter-spacing:.02em;
+    overflow:hidden;white-space:nowrap;text-shadow:0 1px 2px rgba(0,0,0,.45);
+    background-image:linear-gradient(180deg,rgba(255,255,255,.24),rgba(0,0,0,.12));
+    border-top:1px solid rgba(255,255,255,.22)}
+  .barlabel{margin-top:7px;color:var(--muted);font-size:12px}
+  .cap{color:var(--muted);font-size:11px;margin-top:2px}
+  .legend{flex:1;min-width:240px}
+  .keytable{border-collapse:collapse;width:100%}
+  .keytable td{padding:3px 6px;vertical-align:top;font-size:12.5px}
+  .sw{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:7px;vertical-align:-1px}
+  .narr{background:var(--panel2);border-left:3px solid var(--accent);border-radius:0 7px 7px 0;
+    padding:11px 14px;margin:12px 0;color:var(--txt);font-size:13.5px}
+  .narr.warn{border-left-color:var(--warn)}
+  .narr.cpu{border-left-color:var(--ref)}
+
+  /* code */
+  pre{background:var(--code);border:1px solid var(--line);border-radius:9px;color:#c9d1d9;
+    padding:13px 15px;overflow-x:auto;font-size:12.4px;line-height:1.5;margin:8px 0}
+  pre .cm{color:#6b7785}
+  pre .kw{color:#ff7b72}
+  pre .fn{color:#d2a8ff}
+  pre .st{color:#a5d6ff}
+  pre .nm{color:#79c0ff}
+  .floc{font-size:11.5px;color:var(--muted);margin:8px 0 0}
+  .floc b{color:var(--accent)}
+  .ann{font-size:12.5px;color:var(--muted);margin:4px 0 0;padding-left:4px}
+  .tag{font-size:11px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 7px;color:var(--muted)}
+  hr{border:none;border-top:1px solid var(--line);margin:34px 0}
+  .foot{color:var(--muted);font-size:12px;margin-top:30px}
+  .em{color:var(--accent);font-weight:650}
+
+  /* step lists */
+  ol.seq{counter-reset:s;list-style:none;padding-left:0;margin:8px 0}
+  ol.seq li{position:relative;padding:9px 12px 9px 46px;margin:8px 0;background:var(--panel2);
+    border:1px solid var(--line);border-radius:8px;font-size:13px}
+  ol.seq li::before{counter-increment:s;content:counter(s);position:absolute;left:11px;top:9px;
+    min-width:24px;height:22px;padding:0 4px;border-radius:11px;background:var(--accent);color:#fff;
+    font-weight:700;font-size:11.5px;display:flex;align-items:center;justify-content:center}
+  ol.seq.actor li::before{background:var(--actor)} ol.seq.vllm li::before{background:var(--actor)}
+  ol.seq li b{color:var(--txt)}
+  .cref{margin-top:9px;font-family:"SF Mono",ui-monospace,monospace;font-size:11.3px;color:var(--muted);
+    background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:8px 10px;line-height:1.65}
+  .cref::before{content:"Relevant functions in VeRL";display:block;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    font-weight:700;font-size:10px;letter-spacing:.05em;text-transform:uppercase;
+    color:var(--accent);margin-bottom:5px}
+  .cref b{color:var(--txt);font-weight:600}
+  .cref code{color:var(--accent)}
+  .cref .codehdr{margin:9px 0 0;font-family:"SF Mono",ui-monospace,monospace;font-size:10.5px;
+    color:var(--muted);background:var(--panel2);border:1px solid var(--line);border-bottom:none;
+    border-radius:7px 7px 0 0;padding:5px 9px}
+  pre.light{margin:0;border-radius:0 0 7px 7px;border:1px solid var(--line);
+    background:#fbfcfd;color:#1f2328;font-size:11.6px}
+  pre.light .cm{color:#6e7781}
+  pre.light .fn{color:#6f42c1;font-weight:600}
+  pre.light .kw{color:#cf222e}
+  pre.light .st{color:#0a3069}
+  pre.light .nm{color:#0550ae}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>How do the FSDP actor and the vLLM rollout share the same GPUs in a colocated verl GRPO run?</h1>
+
+  <div class="card">
+    <p class="ann" style="margin-top:12px">
+      <span class="em">Configuration setup</span>
+    </p>
+    <div class="kv">
+      <span class="pill">4× GPU single node</span>
+      <span class="pill">Qwen3-8B (~8.98B) actor</span>
+      <span class="pill">FSDP2 (<code>fully_shard</code>)</span>
+      <span class="pill">colocated / hybrid engine</span>
+      <span class="pill">vLLM TP=1 (4 DP replicas)</span>
+    </div>
+    <div class="kv" style="margin-top:8px">
+      <span class="pill">actor <code>param_offload=False</code></span>
+      <span class="pill">actor <code>optimizer_offload=False</code></span>
+      <span class="pill">ref <code>param_offload=True</code></span>
+      <span class="pill"><code>gpu_memory_utilization=0.25</code></span>
+      <span class="pill"><code>free_cache_engine=True</code></span>
+      <span class="pill">vLLM ≥0.8.5 → <code>sleep_level=2</code></span>
+    </div>
+    <p class="ann" style="margin-top:12px">
+      <span class="em">TL;DR</span> the actor (FSDP) and the rollout (vLLM)
+      live on the <i>same</i> GPUs. They cannot both own their full footprint at once, so verl time-shares the
+      GPU: vLLM is put to sleep (its weights + KV pool freed back to the OS via vLLM's <code>CuMemAllocator</code>)
+      while the actor trains, and woken while it generates. With actor offload off, the FSDP actor +
+      optimizer stay resident the whole time, so vLLM only gets a fraction of each GPU, and its memory is the part
+      that churns.
+    </p>
+  </div>
+
+  <!-- legend, shown once -->
+  <div class="card">
+    <p class="ann" style="margin-top:0;margin-bottom:8px"><span class="em">How to read the bars</span>: each
+    section below shows one GPU (rank 0, 80&nbsp;GB) at that phase. Heights are illustrative, scaled to tell the
+    story, not measured.</p>
+    <table class="keytable">
+      <tr><td><span class="sw" style="background:var(--actor)"></span>FSDP actor params (sharded ¼)</td>
+          <td><span class="sw" style="background:var(--opt)"></span>Optimizer state (fp32 master + Adam m,v)</td></tr>
+      <tr><td><span class="sw" style="background:var(--grad)"></span>Gradients + activations</td>
+          <td><span class="sw" style="background:var(--ref)"></span>Ref policy (offloaded → CPU)</td></tr>
+      <tr><td><span class="sw" style="background:var(--vw)"></span>vLLM weights (full model, TP=1)</td>
+          <td><span class="sw" style="background:var(--vkv)"></span>vLLM KV-cache pool</td></tr>
+      <tr><td><span class="sw" style="background:var(--free)"></span>Free / reserved</td>
+          <td><span class="sw" style="background:#fb7185"></span>Weight all-gather (transient, during sync)</td></tr>
+    </table>
+  </div>
+
+  <!-- ============================================================= 1 -->
+  <h2>1 · Initialization </h2>
+  <div class="gpuwrap">
+    <div class="barbox">
+      <div class="bar" id="bar0"></div>
+      <div class="barlabel">GPU rank 0 · 80 GB</div>
+      <div class="cap" id="cap0"></div>
+    </div>
+    <div class="legend">
+      <div class="narr" id="narr0"></div>
+      <div class="narr cpu" id="cpu0"></div>
+    </div>
+  </div>
+
+  <h3>Step-1: Actor loading. FSDP2 builds a <i>sharded</i> model</h3>
+  <p class="ann" style="margin-bottom:10px">Each of the N GPUs permanently holds only 1/N of every
+  parameter, without any rank ever materializing the whole model on its GPU.</p>
+  <ol class="seq actor">
+    <li><b>Build the model.</b> Each rank picks its init context locally
+      (no cross-rank comms):
+      <div style="margin:7px 0 2px;font-size:12.6px;line-height:1.75">
+        <div>• rank 0 → <code>cpu_init_weights</code> → builds on CPU and loads the real checkpoint weights.</div>
+        <div>• ranks 1…N-1 → <code>init_empty_weights</code> (accelerate) → builds on the meta device with zero-byte tensors, only registering the shape and dtype.</div>
+      </div>
+      <div class="cref"><b>verl/utils/fsdp_utils.py</b> · <code>get_init_weight_context_manager()</code><br>
+      <b>verl/workers/engine/fsdp/transformer_impl.py</b> · <code>FSDPEngine._build_module()</code></div></li>
+
+    <li><b>Shard into DTensors, then broadcast the weights in.</b> Two separate things: sharding the empty slots,
+      then streaming the weights into them.
+      <div style="margin:7px 0 2px;font-size:12.6px;line-height:1.8">
+        <div>• <i>Shard.</i> <code>fully_shard</code> wraps each decoder layer (still on CPU) so every parameter becomes
+          a DTensor with placement <code>Shard(0)</code>, one logical tensor split along dim&nbsp;0 across the GPU
+          mesh, each rank owning a 1/N slice (<code>.shape</code> stays global, <code>.to_local()</code> is the
+          local slice).</div>
+        <div>• <i>Put the slots on GPU.</i> The sharded module moves to GPU: rank 0 via <code>.to(device)</code> (its
+          real 1/N shard), ranks 1…N-1 via <code>.to_empty(device)</code> (an empty 1/N slot). Note the broadcast
+          source is a separate full CPU snapshot (<code>full_state</code>), held only on rank 0.</div>
+        <div>• <i>Broadcast, one parameter at a time.</i> rank 0 lifts a full parameter from its CPU snapshot up to a
+          GPU buffer and <code>broadcast</code>s it. Every rank (rank 0 included) transiently allocates a
+          full-size GPU buffer to receive it, then copies out only its own 1/N slice into its shard slot.</div>
+        <div>• <i>Release.</i> The transient full-param GPU buffer is freed on all ranks after each parameter;
+          rank 0's CPU snapshot is dropped only once the whole loop finishes.</div>
+      </div>
+      <div class="cref"><b>verl/utils/fsdp_utils.py</b> · <code>apply_fsdp2()</code> (→ <code>fully_shard()</code>),
+      <code>fsdp2_load_full_state_dict()</code> (→ <code>_broadcast_state_dict()</code>)
+      <div class="codehdr">verl/workers/engine/fsdp/transformer_impl.py:402–419</div>
+<pre class="light">mp_policy = <span class="fn">MixedPrecisionPolicy</span>(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+full_state = module.state_dict()                          <span class="cm"># snapshot (rank 0 = real weights)</span>
+<span class="fn">apply_fsdp2</span>(module, fsdp_kwargs, self.engine_config)        <span class="cm"># shard each layer → Shard(0) DTensors</span>
+<span class="fn">fsdp2_load_full_state_dict</span>(module, full_state, fsdp_mesh, offload_policy)  <span class="cm"># broadcast → fill shards</span></pre></div></li>
+
+    <li><b>Build the optimizer, after the model is loaded.</b> AdamW is constructed over
+      <code>module.parameters()</code>, already the sharded DTensors, so its state is naturally 1/N-sized. The
+      <code>m</code>/<code>v</code> buffers (≈ 2× fp32 of the shard) are allocated lazily on the first
+      <code>step()</code>; they appear during the first actor update, not at init.
+      <div class="cref"><b>verl/workers/engine/fsdp/transformer_impl.py</b> · <code>FSDPEngine._build_optimizer()</code>
+      → <code>build_optimizer()</code><br><span style="color:var(--muted)">ordering in
+      <code>_build_model_optimizer()</code></span></div></li>
+  </ol>
+
+  <h3>(2) vLLM loading (Simplified TP=1)</h3>
+  <p class="ann" style="margin-bottom:10px">With tensor-parallel size 1, vLLM does
+  not shard. Each GPU gets its own complete copy of the model.</p>
+  <ol class="seq vllm">
+    <li><b>Spin up the replicas.</b> verl works out how many replicas to run (when TP=1 with 4 GPUs, it will create 4 replicas); Ray launches one worker process per replica and pins it to a GPU; verl's rollout code, running inside each, then constructs the vLLM engine, each holding the full model.
+      <div class="cref"><b>verl/workers/rollout/vllm_rollout/vllm_rollout.py</b><br>
+      <b>verl/workers/rollout/replica.py</b></div></li>
+
+    <li><b>Allocate weights as “dummy”.</b> Default <code>load_format="dummy"</code>: each replica allocates
+      full-model weight buffers and fills them with random values (no disk read).
+      <div class="cref"><b>verl/workers/config/rollout.py</b> · <code>load_format = "dummy"</code><br>
+      <b>vllm/model_executor/model_loader/weight_utils.py</b> · <code>initialize_dummy_weights()</code></div></li>
+
+    <li><b>Profile, then reserve the KV-cache pool.</b> vLLM runs a profiling forward: one dummy forward at the
+      worst-case (max) batch, used only to measure peak GPU memory (weights + activations). It then takes whatever is
+      left within the <code>gpu_memory_utilization</code> budget and carves it into fixed-size blocks (each
+      holding ~16 tokens of KV, all layers), which it physically reserves up front as the empty KV pool (prints
+      <code>#GPU blocks: N</code>). Space is committed at init; the actual K/V values are only written during
+      generation. Engine uses <code>enable_sleep_mode=True</code> so the pool can be released on sleep.
+      <div class="cref"><b>verl/workers/rollout/vllm_rollout/vllm_rollout.py</b> · engine init
+      (<code>gpu_memory_utilization</code>, <code>enable_sleep_mode</code>)<br><span style="color:var(--muted)">KV sizing
+      is vLLM-internal (<code>determine_num_available_blocks</code>)</span></div></li>
+
+    <li><b>Real weights arrive by sync.</b> On the first rollout, the actor all-gathers its shards to
+      full tensors and streams them over CUDA IPC into each replica. At <code>TP=1</code> it's a straight
+      whole-tensor copy, no resharding needed. See section 2, Wake vLLM and sync weights.
+      <div class="cref">actor side <b>verl/workers/engine/fsdp/transformer_impl.py</b> · <code>get_per_tensor_param()</code><br>
+      rollout side <b>verl/workers/rollout/vllm_rollout/vllm_rollout.py</b> · <code>update_weights()</code> →
+      <code>update_weights_from_ipc()</code></div></li>
+  </ol>
+
+  <!-- ============================================================= 2 -->
+  <h2>2 · Wake vLLM + sync weights</h2>
+  <div class="gpuwrap">
+    <div class="barbox">
+      <div class="bar" id="bar1"></div>
+      <div class="barlabel">GPU rank 0 · 80 GB</div>
+      <div class="cap" id="cap1"></div>
+    </div>
+    <div class="legend">
+      <div class="narr" id="narr1"></div>
+      <div class="narr cpu" id="cpu1"></div>
+    </div>
+  </div>
+
+  <p class="ann" style="margin-bottom:10px">A step's rollout begins by waking vLLM's freed memory and pushing the
+  actor's fresh weights into it (gated on <code>free_cache_engine=True</code>).</p>
+  <ol class="seq vllm">
+    <li><b>Wake the weight buffers.</b>
+      <div style="margin:7px 0 2px;font-size:12.6px;line-height:1.8">
+        <div>• <i>[Background Knowledge] Allocation model.</i> Each vLLM tensor reserves a fixed virtual address (via CUDA's VMM API)
+          with physical GPU pages mapped behind it. The torch tensors and model structure only ever reference
+          the virtual address.</div>
+        <div>• <i>[Background Knowledge] What <code>sleep(level=2)</code> did</i>. After vLLM rollout and before the actor starts training, vLLM called <code>sleep(level=2)</code>. It unmapped and freed the
+          physical pages (handing that GPU memory back so the actor could train), but kept the virtual
+          reservations and the tensor objects. So the model structure survived; it just had no bytes behind it.</div>
+        <div>• <i>What <code>wake_up</code> does now.</i> It maps fresh physical pages back onto those same
+          virtual addresses. The weight tensors instantly become valid again (same shapes, same addresses), but the
+          new pages hold undefined leftover bytes (no re-init, not the old weights; possibly the actor's stale
+          grad/activation data).</div>
+      </div>
+      So the weight tensors now exist and are addressable but contain garbage.
+      <div class="cref"><b>verl/workers/rollout/vllm_rollout/vllm_rollout.py</b> · <code>resume()</code> →
+      <code>wake_up()</code> · <code>release()</code> → <code>sleep()</code></div></li>
+
+    <li><b>Gather the actor's fresh weights one parameter at a time.</b> <code>get_per_tensor_param</code> processes the
+      parameters one at a time through a "lazy generator". For each parameter, <code>param.full_tensor()</code> calls
+      <code>all_gather</code>. It combines the shards from all ranks so that every rank (not just rank 0) ends up with
+      the full tensor, which is then cast to bf16. Only one parameter is live at a time (the pink block in the GPU memory diagram above). The whole model is never unsharded at once, so the transient stays small.
+      <div class="cref"><b>verl/workers/engine/fsdp/transformer_impl.py</b> · <code>get_per_tensor_param()</code> →
+      <code>DTensor.full_tensor()</code>
+      <div class="codehdr">what <code>.full_tensor()</code> runs under the hood</div>
+<pre class="light">param.<span class="fn">full_tensor</span>()                       <span class="cm">← what you call (DTensor convenience method)</span>
+  └─ redistribute Shard(0) → Replicate        <span class="cm">← DTensor: every rank needs all shards</span>
+       └─ <span class="fn">all_gather</span>(...)                  <span class="cm">← the actual collective function it invokes</span>
+            └─ <span class="fn">ncclAllGather</span>                 <span class="cm">← low-level NCCL/GPU primitive that moves the bytes</span></pre></div></li>
+
+    <li><b>Stream into vLLM over CUDA IPC.</b> The full weights now have to cross from the actor process into its
+      colocated vLLM process: same GPU, but not the same address space.
+      <div style="margin:7px 0 2px;font-size:12.6px;line-height:1.8">
+        <div>• <i>Why a special transfer is needed.</i> The FSDP actor and the vLLM engine run in separate OS processes
+          (separate Ray workers / the vLLM engine subprocess), even though they sit on the same physical GPU. A CUDA
+          tensor in process A is invisible to process B (each has its own CUDA context and address space), so the
+          freshly all-gathered weight can't be handed to vLLM's buffer directly.</div>
+        <div>• <i>Why not just copy it.</i> The naive route is actor GPU → CPU → vLLM GPU, and that host round-trip is
+          slow. <code>CUDA IPC</code> (Inter-Process Communication) avoids it: one process exports a handle to its GPU
+          memory, the other maps and reads it: a direct GPU→GPU copy, no host hop.</div>
+        <div>• <code>update_weights()</code> <i>is the orchestrator (rollout side).</i> The entry point verl calls with
+          the per-tensor generator from step 2. It pulls tensors from the generator, batched by
+          <code>update_weights_bucket_megabytes</code> (e.g. <code>WEIGHT_BUCKET_MB=512</code>), and dispatches the
+          transfer to the vLLM worker via RPC, passing a <code>use_shm</code> flag (IPC vs. shared-memory fallback).</div>
+        <div>• <code>update_weights_from_ipc()</code> <i>is the mover (in each vLLM worker).</i> Imports the actor's CUDA
+          IPC handle, maps the same GPU memory into its own process, and copies it GPU→GPU into the model's weight
+          buffers, overwriting the dummy/garbage values with the current policy.</div>
+      </div>
+      Each bucket's transient (~0.5&nbsp;GB, defined by WEIGHT_BUCKET_MB) is freed before the next, so the sync never costs the full model.
+      <div class="cref"><b>verl/workers/rollout/vllm_rollout/vllm_rollout.py</b> · <code>update_weights()</code> →
+      <code>update_weights_from_ipc()</code>
+      <div class="codehdr">how <code>update_weights()</code> dispatches the transfer</div>
+<pre class="light"><span class="fn">update_weights</span>(generator)                <span class="cm">← rollout side: batch by WEIGHT_BUCKET_MB, dispatch</span>
+   └─ <span class="fn">update_weights_from_ipc</span>(use_shm)   <span class="cm">← in each vLLM worker:</span>
+        ├─ import CUDA IPC handle         <span class="cm">← map the actor's GPU memory into this process</span>
+        └─ <span class="fn">load_weights</span>()                <span class="cm">← copy GPU→GPU into vLLM's weight buffers</span>
+   (fallback: shared memory if IPC unsupported → use_shm)</pre></div></li>
+
+    <li><b>Wake the KV pool.</b> <code>resume(["kv_cache"])</code> → <code>wake_up(tags=["kv_cache"])</code>
+      re-allocates the (empty) KV-cache pool.
+      <div class="cref"><b>verl/workers/rollout/vllm_rollout/vllm_rollout.py</b> · <code>resume()</code></div></li>
+  </ol>
+
+  <!-- ============================================================= 3 -->
+  <h2>3 · Generate (rollout)</h2>
+  <div class="gpuwrap">
+    <div class="barbox">
+      <div class="bar" id="bar2"></div>
+      <div class="barlabel">GPU rank 0 · 80 GB</div>
+      <div class="cap" id="cap2"></div>
+    </div>
+    <div class="legend">
+      <div class="narr" id="narr2"></div>
+      <div class="narr cpu" id="cpu2"></div>
+    </div>
+  </div>
+
+  <ol class="seq vllm">
+    <li><b>How the rollout is batched.</b>
+      <div style="margin:7px 0 2px;font-size:12.6px;line-height:1.8">
+        <div>• <i>How many sequences a step generates.</i> <code>data.train_batch_size</code>
+          (<code>TRAIN_BATCH_SIZE=8</code>) is the number of prompts per training step;
+          <code>actor_rollout_ref.rollout.n</code> (<code>ROLLOUT_N=8</code>) is the number of responses per prompt
+          (the GRPO group). So vLLM generates <code>TRAIN_BATCH_SIZE × ROLLOUT_N = 64</code> sequences this step.</div>
+        <div>• <i>Data parallel, across replicas.</i> The 8 prompts are split across the 4 DP vLLM replicas, so ~2 prompts each, ×8 responses ≈ 16 sequences per replica. Each replica generates its share
+          independently, and the results are gathered afterward.</div>
+        <div>• <i>Continuous batching, within a replica.</i> vLLM does not run a fixed batch. Its scheduler runs as many
+          sequences concurrently as fit, bounded by <code>max_num_seqs</code>, <code>max_num_batched_tokens</code>, and
+          the KV-pool size (set by <code>gpu_memory_utilization</code> and <code>MAX_MODEL_LEN</code>). As sequences
+          finish, queued ones are admitted, so the running batch flexes over time.</div>
+        <div>• <i>Per prompt: parallel.</i> The <code>ROLLOUT_N</code> responses for one prompt come
+          from <code>SamplingParams(n=ROLLOUT_N)</code>.</div>
+      </div>
+      <div class="cref"><b>verl/workers/rollout/vllm_rollout/vllm_rollout.py</b> · <code>generate_sequences()</code>
+      · vLLM <code>SamplingParams(n=...)</code>, <code>max_num_seqs</code>, <code>max_num_batched_tokens</code></div></li>
+  </ol>
+
+  <!-- ============================================================= 4 -->
+  <h2>4 · Sleep vLLM</h2>
+  <div class="gpuwrap">
+    <div class="barbox">
+      <div class="bar" id="bar3"></div>
+      <div class="barlabel">GPU rank 0 · 80 GB</div>
+      <div class="cap" id="cap3"></div>
+    </div>
+    <div class="legend">
+      <div class="narr" id="narr3"></div>
+      <div class="narr cpu" id="cpu3"></div>
+    </div>
+  </div>
+
+  <div class="cref"><b>verl/workers/rollout/vllm_rollout/vllm_rollout.py</b> · <code>release()</code> → vLLM
+      <code>sleep()</code>
+      <div class="codehdr">how <code>release()</code> puts vLLM to sleep</div>
+<pre class="light"><span class="fn">release</span>()                    <span class="cm">← verl trigger (gated on free_cache_engine)</span>
+   └─ <span class="fn">sleep</span>(level)             <span class="cm">← vLLM engine: free its GPU memory</span>
+        └─ <span class="fn">CuMemAllocator</span>      <span class="cm">← unmaps/frees the physical pages (keeps the virtual addresses)</span>
+
+level 1:  offload weights to CPU, drop KV   <span class="cm">(weights restored from CPU on wake)</span>
+level 2:  discard weights AND KV            <span class="cm">(weights re-synced from the actor on wake)  ← this run, vLLM ≥ 0.8.5</span></pre></div>
+
+  <!-- ============================================================= 5 -->
+  <h2>5 · Actor update (train)</h2>
+  <div class="gpuwrap">
+    <div class="barbox">
+      <div class="bar" id="bar4"></div>
+      <div class="barlabel">GPU rank 0 · 80 GB</div>
+      <div class="cap" id="cap4"></div>
+    </div>
+    <div class="legend">
+      <div class="narr" id="narr4"></div>
+      <div class="narr cpu" id="cpu4"></div>
+    </div>
+  </div>
+
+  <ol class="seq actor">
+    <li><b>Ref log-probs come from a CPU-offloaded forward.</b> The ref policy is forward-only (no gradients, no
+      optimizer). Under FSDP2 it gets a <code>CPUOffloadPolicy(pin_memory=True)</code>, so its sharded params stay
+      pinned on CPU.
+      <div style="margin:7px 0 2px;font-size:12.6px;line-height:1.8">
+        <div>• <i>When it runs.</i> For the KL term, verl runs one <code>no_grad</code> forward of the ref to get the
+          ref log-probs of the rollout responses.</div>
+        <div>• <i>How it moves.</i> FSDP2 gathers each layer's shards CPU→GPU (bf16) just in time, computes, then frees
+          them. It is per-layer, so only about one layer is on the GPU at a time, not the whole ~9 GB model. After the
+          forward, nothing of the ref stays resident.</div>
+      </div>
+      <div class="cref"><b>verl/workers/engine/fsdp/transformer_impl.py</b> · <code>CPUOffloadPolicy</code> (set for
+      <code>forward_only</code>) · ref log-probs in <code>RayPPOTrainer.fit()</code> →
+      <code>compute_ref_log_prob()</code></div></li>
+
+    <li><b>One FSDP2 forward + backward + step.</b> The actor update is a sharded training loop. Per FSDP unit (one
+      decoder layer):
+      <div style="margin:7px 0 2px;font-size:12.6px;line-height:1.8">
+        <div>• <i>Forward (layers in order).</i> all-gather the layer's shards into a full bf16 layer, compute, then
+          reshard (free the full copy, keep the 1/N shard) because <code>reshard_after_forward=True</code>. With
+          <code>enable_gradient_checkpointing=True</code>, inner activations are not saved, only the layer input.</div>
+        <div>• <i>Backward (layers in reverse).</i> all-gather the shards again, recompute the layer's activations
+          (checkpointing), compute gradients, then reduce-scatter the gradients so each rank keeps only its 1/N grad
+          shard; reshard the params.</div>
+        <div>• <i>Optimizer step.</i> Each rank updates only its own 1/N master shard (fp32) with its 1/N grad shard and
+          its 1/N Adam m/v. This is purely local, with no communication.</div>
+        <div>• <i>Memory.</i> Resident: the sharded master + Adam state. Transient: the per-layer full gather (about one
+          layer), the gradients, and the (checkpointed) activations. Actor offload is off, so the actor shards never
+          leave the GPU (<code>_context_switch</code> is a no-op); vLLM being asleep is what makes room.</div>
+      </div>
+      <div class="cref"><b>verl/utils/fsdp_utils.py</b> · <code>apply_fsdp2()</code> / <code>fully_shard()</code> ·
+      <b>verl/workers/engine/base.py</b> · <code>_context_switch()</code> · actor update in
+      <code>RayPPOTrainer.fit()</code> → <code>update_actor()</code>
+      </li>
+  </ol>
+
+  <hr/>
+  <p class="foot">Standard colocated verl GRPO (FSDP2 actor + vLLM hybrid engine). Code refs are verl HEAD in
+  <code>.venv-verl</code>. Bar sizes are illustrative. Open this file in any browser; no network needed.</p>
+
+</div>
+
+<script>
+const GPU = 80; // GB, illustrative
+const PHASES = [
+  {
+    narr:"FSDP2 builds the actor sharded in place: each rank owns ~1/N of the params plus fp32 master and "+
+         "(after step 1) Adam state. vLLM reserves its <code>gpu_memory_utilization</code> budget: a full"+
+         "model copy (TP=1) plus an empty KV pool. The ref policy is forward-only, so its params are offloaded to CPU. Init builds two very different things on each GPU: a sharded actor and a full-copy vLLM engine (TP=1).",
+    cpu:"<b>CPU holds:</b> ref-policy params (offloaded), pulled to GPU only when ref log-probs are computed.",
+    cap:"~56 GB used",
+    segs:[["actor",4.5],["opt",27],["vw",14],["vkv",6]]
+  },
+  {
+    narr:"During training, the rollout runs at the start of each step. Coming out of the previous step's actor "+
+         "update, the GPU holds only the actor params and optimizer state (vLLM is still asleep, its weights and KV "+
+         "freed; the ref policy sits on CPU). verl wakes vLLM's freed weight + KV memory, then streams the actor's "+
+         "fresh weights in.",
+    cpu:"<b>CPU holds:</b> ref params parked. The per-parameter gather buffer lives on GPU only during its IPC copy.",
+    cap:"~54 GB used",
+    segs:[["actor",4.5],["opt",27],["vw",14],["vkv",6],["gather",2]]
+  },
+  {
+    narr:"vLLM is awake and generates samples per prompt. Its KV pool <i>fills</i> as sequences grow, but the bytes "+
+         "were already reserved at init, so the footprint doesn't grow; only how many blocks are in use. The FSDP "+
+         "actor + optimizer stay resident (offload off) but idle.",
+    cpu:"<b>CPU holds:</b> ref params parked. Actor gradients/activations were freed after the weight sync.",
+    cap:"~62 GB used",
+    segs:[["actor",4.5],["opt",27],["vw",14],["vkv",13]]
+  },
+  {
+    narr:"After vLLM rollout and before the actor starts training, <code>release()</code> in VeRL calls <code>sleep(level=2)</code>. vLLM's <code>CuMemAllocator</code> frees its weights "+
+         "and the whole KV pool, handing the memory back to the GPU so the actor update has room. "+
+         "It unmapped and freed the physical pages, but kept the "+
+         "virtual reservations and the tensor objects. So the model structure survived; it just had no bytes behind it.",
+    cpu:"<b>CPU holds:</b> ref params parked, about to be summoned for ref log-probs.",
+    cap:"~32 GB used",
+    segs:[["actor",4.5],["opt",27]]
+  },
+  {
+    narr:"Inside <code>train_mode()</code>, the actor computes old/ref log-probs and advantages, then backward + "+
+         "<code>optimizer.step()</code>. Gradients and activations now have room because vLLM is asleep. The ref "+
+         "policy is briefly loaded to GPU for its log-probs, then re-offloaded.",
+    cpu:"<b>CPU ↔ GPU:</b> ref params summoned for ref log-probs, then offloaded again. With actor offload OFF the "+
+        "actor itself never moves.",
+    cap:"~52 GB used",
+    segs:[["actor",4.5],["opt",27],["grad",12],["ref",4.5]]
+  }
+];
+const COLOR={actor:"var(--actor)",opt:"var(--opt)",grad:"var(--grad)",act:"var(--act)",
+  vw:"var(--vw)",vkv:"var(--vkv)",ref:"var(--ref)",gather:"#fb7185"};
+const LBL={actor:"actor",opt:"optim",grad:"grad/act",act:"act",vw:"vLLM w",vkv:"vLLM KV",ref:"ref",gather:"wt gather"};
+
+function renderBar(el, segs){
+  el.innerHTML="";
+  segs.forEach(([k,gb])=>{
+    const d=document.createElement("div");
+    d.className="seg";
+    d.style.backgroundColor=COLOR[k];
+    d.style.height=(gb/GPU*100)+"%";
+    d.textContent=(gb>=3? LBL[k] : "");
+    d.title=LBL[k]+" ≈ "+gb+" GB";
+    el.appendChild(d);
+  });
+}
+PHASES.forEach((p,i)=>{
+  renderBar(document.getElementById("bar"+i), p.segs);
+  document.getElementById("cap"+i).textContent=p.cap;
+  document.getElementById("narr"+i).innerHTML=p.narr;
+  document.getElementById("cpu"+i).innerHTML=p.cpu;
+});
+</script>
+</body>
+</html>

@@ -82,12 +82,15 @@ analytics:
 author:
   name             : "Xinnuo Xu"
   avatar           : "IMG_0120.jpeg"
-  bio              : "Your biography for the left-hand sidebar"
-  location         : "Edinburgh, UK"
+  bio              : "I do Natural Language Processing, rock climbing, and photography."
+  locations:
+    - "Edinburgh, UK"
+    - "Cambridge, UK"
+    - "Beijing, China"
   employer         :
   pubmed           :
   googlescholar    : "https://scholar.google.co.uk/citations?user=osgiI-AAAAAJ"
-  email            :
+  email            : xuxinnuo at yahoo dot com
   researchgate     :  # example: "https://www.researchgate.net/profile/yourprofile"
   uri              :
   bitbucket        :
