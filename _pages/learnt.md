@@ -2,7 +2,7 @@
 permalink: /what-ive-learnt/
 title: "What I've learnt"
 excerpt: "Lessons, reflections, and things I've picked up along the way."
-author_profile: true
+author_profile: false
 ---
 
 Here are the things I've learnt in my daily life 😲
