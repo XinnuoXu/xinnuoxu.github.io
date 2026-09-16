@@ -10,3 +10,5 @@ Here are the things I've learnt in my daily life 😲
 ## Engineering
 
 🔥[How Do the Actor and the vLLM Rollout Share the Same GPUs in a Colocated VeRL GRPO Run?](/blogs/verl_memory_management.html)
+
+🚧[Do VLAs Understand Objects?](/blogs/Do_VLAs_Understand_Objects.html)
